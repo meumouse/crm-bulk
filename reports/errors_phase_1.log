@@ -1,5 +1,0 @@
-2026-03-03T02:51:52.564Z deal=6688506e820dab001dba2f29 [phase1:updateDeal:6688506e820dab001dba2f29] status=422 data={"errors":[{"detail":"`data` object is not valid"}]}
-2026-03-03T02:51:53.042Z deal=668c75d427a7e20001e75caf [phase1:updateDeal:668c75d427a7e20001e75caf] status=422 data={"errors":[{"detail":"`data` object is not valid"}]}
-2026-03-03T02:51:53.544Z deal=668c75d527a7e20001e75dc0 [phase1:updateDeal:668c75d527a7e20001e75dc0] status=422 data={"errors":[{"detail":"`data` object is not valid"}]}
-2026-03-03T02:51:54.099Z deal=66969417bb311e0015396089 [phase1:updateDeal:66969417bb311e0015396089] status=422 data={"errors":[{"detail":"`data` object is not valid"}]}
-2026-03-03T02:51:54.879Z deal=6699b3b6d14694000f222fde [phase1:updateDeal:6699b3b6d14694000f222fde] status=422 data={"errors":[{"detail":"`data` object is not valid"}]}

@@ -17,9 +17,30 @@ import 'dotenv/config';
 
 const BASE_URL = process.env.RD_BASE_URL || 'https://api.rd.services';
 const ACCESS_TOKEN = process.env.RD_ACCESS_TOKEN;
+
+/**
+ * If you keep getting 429, increase this to something like 800~1500ms.
+ */
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 250);
+
+/**
+ * Retry/backoff config
+ */
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
+
+/**
+ * Dry run mode
+ */
 const DRY_RUN = String(process.env.DRY_RUN || 'true').toLowerCase() === 'true';
+
+/**
+ * IMPORTANT:
+ * RD payload shapes can vary by account/version.
+ * If your PUT expects a different key for custom fields, change this env:
+ * - default: "custom_fields"
+ * - examples some APIs use: "deal_custom_fields", "custom_fields_values"
+ */
+const CUSTOM_FIELDS_KEY = String(process.env.CUSTOM_FIELDS_KEY || 'custom_fields');
 
 if (!ACCESS_TOKEN) {
   console.error('Missing RD_ACCESS_TOKEN in .env');
@@ -99,12 +120,8 @@ const DEST = {
 
 /**
  * OLD stages mapping → product + “interest vs acquired” + old stage label + destination stage
- *
- * NOTE:
- * - You can adjust any “oldStageLabel” string to match exactly your Pipeline Atual options labels.
- * - If an option is missing, script will log and skip that field safely.
  */
-const OLD_STAGE_MAP = buildOldStageMap( DEST );
+const OLD_STAGE_MAP = buildOldStageMap(DEST);
 
 const http = axios.create({
   baseURL: BASE_URL,
@@ -138,7 +155,8 @@ async function main() {
   console.log(`\nRD bulk script`);
   console.log(`- Phase: ${PHASE}`);
   console.log(`- DRY_RUN: ${DRY_RUN}`);
-  console.log(`- Delay: ${REQUEST_DELAY_MS}ms\n`);
+  console.log(`- Delay: ${REQUEST_DELAY_MS}ms`);
+  console.log(`- CUSTOM_FIELDS_KEY: ${CUSTOM_FIELDS_KEY}\n`);
 
   // 1) Load custom field definitions to resolve option ids by label
   const dealFieldDefs = await loadDealCustomFieldDefinitions();
@@ -211,7 +229,6 @@ async function phase2MoveDeal(ctx) {
   }
 
   // Minimal move payload: stage_id
-  // RD docs say update-deal can move between stages/pipelines via this endpoint. :contentReference[oaicite:3]{index=3}
   const payload = { stage_id: destStageId };
 
   await updateDeal(dealId, payload, 'phase2');
@@ -228,25 +245,30 @@ async function updateDeal(dealId, body, tag) {
   }
 
   await requestWithRetry(async () => {
-    // Endpoint from docs: PUT https://api.rd.services/crm/v2/deals/{id} :contentReference[oaicite:4]{index=4}
     const res = await http.put(`/crm/v2/deals/${dealId}`, body);
     return res.data;
   }, `${tag}:updateDeal:${dealId}`);
 }
 
 /**
- * Deals iterator (pagination-agnostic)
- * - tries to follow: meta.next_page / next_page / links.next / etc.
+ * Deals iterator (pagination aware)
+ * - Tries to follow next-page hints when present, otherwise falls back to page[number] increment.
  */
 async function* iterateDeals() {
   const pageSize = 25;
   let pageNumber = 1;
+  let nextUrl = null;
   let safety = 0;
 
   while (safety < 100000) {
     safety++;
 
     const data = await requestWithRetry(async () => {
+      if (nextUrl) {
+        const res = await http.get(nextUrl);
+        return res.data;
+      }
+
       const res = await http.get(`/crm/v2/deals`, {
         params: {
           'page[number]': pageNumber,
@@ -254,15 +276,25 @@ async function* iterateDeals() {
         },
       });
       return res.data;
-    }, `listDeals:page=${pageNumber}`);
+    }, `listDeals:${nextUrl ? `nextUrl` : `page=${pageNumber}`}`);
 
     const deals = extractArray(data, ['deals', 'data', 'items']) || [];
-
     for (const d of deals) yield d;
 
-    // Se veio menos que o tamanho da página, acabou.
+    // Try follow next page url (if API provides)
+    const computedNextUrl = extractNextPageUrl(data);
+
+    if (computedNextUrl) {
+      nextUrl = computedNextUrl;
+      // Some APIs return next even when empty; protect:
+      if (!deals.length) break;
+      continue;
+    }
+
+    // Fallback: if came less than page size, stop.
     if (deals.length < pageSize) break;
 
+    // Fallback: page-number pagination
     pageNumber++;
   }
 }
@@ -303,18 +335,23 @@ function extractArray(obj, keys) {
  * fieldId -> { type, optionsLabelToId }
  */
 async function loadDealCustomFieldDefinitions() {
-  // Docs: GET https://api.rd.services/crm/v2/custom_fields :contentReference[oaicite:6]{index=6}
   const data = await requestWithRetry(async () => {
-    const res = await http.get(`/crm/v2/custom_fields`, {
-      params: { query: 'entity:deal' }, // if API supports RDQL param as query
-    });
+    // Some accounts/APIs ignore "query" filters; safest is to fetch and filter client-side.
+    const res = await http.get(`/crm/v2/custom_fields`);
     return res.data;
   }, 'listCustomFields');
 
   const fields = extractArray(data, ['custom_fields', 'data', 'items']) || [];
 
+  // Try to keep only deal entity fields when API provides entity info
+  const dealFields = fields.filter((f) => {
+    const entity = f?.entity || f?.entity_type || f?.entityName || null;
+    if (!entity) return true; // if missing, keep (avoid filtering out everything)
+    return String(entity).toLowerCase() === 'deal';
+  });
+
   const map = {};
-  for (const f of fields) {
+  for (const f of dealFields) {
     if (!f?.id) continue;
     map[f.id] = {
       id: f.id,
@@ -323,16 +360,17 @@ async function loadDealCustomFieldDefinitions() {
       optionsLabelToId: buildOptionsMap(f),
     };
   }
+
   return map;
 }
 
 function buildOptionsMap(field) {
-  const options = field?.options || field?.choices || [];
+  const options = field?.options || field?.choices || field?.values || [];
   const m = {};
   if (Array.isArray(options)) {
     for (const opt of options) {
       const label = opt?.label || opt?.value || opt?.name;
-      const id = opt?.id || opt?.value_id || opt?.option_id;
+      const id = opt?.id || opt?.value_id || opt?.option_id || opt?.key;
       if (label && id) m[String(label).trim()] = String(id);
     }
   }
@@ -342,13 +380,13 @@ function buildOptionsMap(field) {
 /**
  * Phase 1 payload builder (safe):
  * - resolves labels to option_id when possible
- * - if not found, logs and skips that field value
+ * - if not found, sends raw label as last resort
  *
  * IMPORTANT: RD’s exact payload shape for custom fields can vary.
- * This builder uses a very common structure:
- *   { custom_fields: [ { custom_field_id, value }, ... ] }
+ * This builder outputs:
+ *   { [CUSTOM_FIELDS_KEY]: [ { custom_field_id, value }, ... ] }
  *
- * If the API returns 400 complaining about shape, you only change this function.
+ * If your API expects another shape, change CUSTOM_FIELDS_KEY via .env or adjust this function.
  */
 function buildDealUpdatePayloadPhase1(mapping, defs) {
   const updates = [];
@@ -379,21 +417,21 @@ function buildDealUpdatePayloadPhase1(mapping, defs) {
 
   if (updates.length === 0) return null;
 
-  // ⚠️ Adjust here if your API expects a different structure.
-  return { custom_fields: updates };
+  return { [CUSTOM_FIELDS_KEY]: updates };
 }
 
 function resolveSingle(defs, fieldId, label) {
   const def = defs?.[fieldId];
   if (!def) return null;
 
+  const clean = String(label).trim();
+
   // try option_id
-  const optionId = def.optionsLabelToId?.[String(label).trim()];
+  const optionId = def.optionsLabelToId?.[clean];
   if (optionId) return optionId;
 
-  // fallback: sometimes APIs accept raw label; keep it as last resort
-  // If you want "strict only", return null here.
-  return String(label).trim();
+  // fallback: sometimes APIs accept raw label
+  return clean;
 }
 
 function resolveMulti(defs, fieldId, labels) {
@@ -402,8 +440,9 @@ function resolveMulti(defs, fieldId, labels) {
 
   const arr = [];
   for (const l of labels) {
-    const optionId = def.optionsLabelToId?.[String(l).trim()];
-    arr.push(optionId || String(l).trim());
+    const clean = String(l).trim();
+    const optionId = def.optionsLabelToId?.[clean];
+    arr.push(optionId || clean);
   }
 
   return arr.length ? arr : null;
@@ -415,20 +454,11 @@ function resolveMulti(defs, fieldId, labels) {
  * - customer funnels -> Produto adquirido
  * - determine destination stage in new funnels (phase2)
  */
-function buildOldStageMap( dest ) {
+function buildOldStageMap(dest) {
   const map = {};
-
-  // helper
   const add = (oldStageId, cfg) => (map[oldStageId] = cfg);
 
   // ===== Interest funnels → Low Ticket =====
-  // Rule you gave:
-  // - Sem contato + Mensagem automática -> Low Ticket: Sem contato
-  // - Mensagem enviada -> Contato feito
-  // - Demonstrou interesse / Oferta enviada / Follow-up -> Identificação do interesse
-  // - Comprou -> Assinou
-  // - Downsell -> Downsell
-
   // Parcelas Customizadas (interesse)
   add('660f0b8e342d130018be8cdd', mkInterest('Parcelas Customizadas', 'Parcelas Customizadas - Sem contato', dest.lowTicket.semContato));
   add('6683007ae5e01300130510c1', mkInterest('Parcelas Customizadas', 'Parcelas Customizadas - Mensagem automática', dest.lowTicket.semContato));
@@ -479,7 +509,7 @@ function buildOldStageMap( dest ) {
   add('6750541a0040eb0019e99e14', mkInterest('Joinotify', 'Joinotify - Comprou', dest.lowTicket.assinou));
   add('6750543c37e542001ecc3572', mkInterest('Joinotify', 'Joinotify - Downsell', dest.lowTicket.downsell));
 
-  // Clube M (interesse) → vai para pipeline Clube M (regra sua)
+  // Clube M (interesse) → pipeline Clube M
   add('6737d404de65ed0013eadef9', mkInterest('Clube M', 'Clube M - Sem contato', dest.clubeM.leadElegivel));
   add('6737d4314abefe0013c02fb4', mkInterest('Clube M', 'Clube M - Mensagem automática', dest.clubeM.leadElegivel));
   add('6685683fdae88e00221287dc', mkInterest('Clube M', 'Clube M - Mensagem enviada', dest.clubeM.apresentacao));
@@ -490,14 +520,6 @@ function buildOldStageMap( dest ) {
   add('6737d4d8a2405f002a0a66b5', mkInterest('Clube M', 'Clube M - Downsell', dest.clubeM.negociacao));
 
   // ===== Customer funnels → Assinaturas/Recorrente =====
-  // Você disse: “Assinatura / Recorrente vai receber todos os antigos funis de clientes ativos”.
-  // Como você não passou IDs das etapas novas “Cancelou”, vou mapear:
-  // - Sem contato/Mensagem automática/Mensagem enviada -> Cliente ativo (conservador)
-  // - Demonstrou interesse/Oferta/Follow-up -> Tentativa de upsell
-  // - Comprou -> Upgrade realizado
-  // - Downsell -> Tentativa de upsell
-
-  // Clientes Parcelas
   add('6614440ee39e860014e99f96', mkAcquired('Parcelas Customizadas', 'Clientes Parcelas - Sem contato', DEST.assinaturas.clienteAtivo));
   add('66835b2214d4ea000f771da8', mkAcquired('Parcelas Customizadas', 'Clientes Parcelas - Mensagem automática', DEST.assinaturas.clienteAtivo));
   add('6614440ee39e860014e99f97', mkAcquired('Parcelas Customizadas', 'Clientes Parcelas - Mensagem enviada', DEST.assinaturas.clienteAtivo));
@@ -507,7 +529,6 @@ function buildOldStageMap( dest ) {
   add('66146d324dadf4001bdf157b', mkAcquired('Parcelas Customizadas', 'Clientes Parcelas - Comprou', DEST.assinaturas.upgradeRealizado));
   add('66146d4442c13a00133e1ba3', mkAcquired('Parcelas Customizadas', 'Clientes Parcelas - Downsell', DEST.assinaturas.tentativaUpsell));
 
-  // Clientes Flexify Checkout
   add('6614441d14083a0010a4d091', mkAcquired('Flexify Checkout', 'Clientes Flexify Checkout - Sem contato', DEST.assinaturas.clienteAtivo));
   add('66835b51b57ae2001047efe2', mkAcquired('Flexify Checkout', 'Clientes Flexify Checkout - Mensagem automática', DEST.assinaturas.clienteAtivo));
   add('6614441d14083a0010a4d092', mkAcquired('Flexify Checkout', 'Clientes Flexify Checkout - Mensagem enviada', DEST.assinaturas.clienteAtivo));
@@ -517,7 +538,6 @@ function buildOldStageMap( dest ) {
   add('66146d7ea8ae31000d45629a', mkAcquired('Flexify Checkout', 'Clientes Flexify Checkout - Comprou', DEST.assinaturas.upgradeRealizado));
   add('66146d8abbd78b001f7b4cdb', mkAcquired('Flexify Checkout', 'Clientes Flexify Checkout - Downsell', DEST.assinaturas.tentativaUpsell));
 
-  // Clientes Flexify Dashboard
   add('66144431c0e4e7002088e214', mkAcquired('Flexify Dashboard', 'Clientes Flexify Dashboard - Sem contato', DEST.assinaturas.clienteAtivo));
   add('66835b790c9f250010056ba1', mkAcquired('Flexify Dashboard', 'Clientes Flexify Dashboard - Mensagem automática', DEST.assinaturas.clienteAtivo));
   add('66144431c0e4e7002088e215', mkAcquired('Flexify Dashboard', 'Clientes Flexify Dashboard - Mensagem enviada', DEST.assinaturas.clienteAtivo));
@@ -527,7 +547,6 @@ function buildOldStageMap( dest ) {
   add('66146dc9fe2d1a0020acee3e', mkAcquired('Flexify Dashboard', 'Clientes Flexify Dashboard - Comprou', DEST.assinaturas.upgradeRealizado));
   add('66146dde27131f000dd1b2c5', mkAcquired('Flexify Dashboard', 'Clientes Flexify Dashboard - Downsell', DEST.assinaturas.tentativaUpsell));
 
-  // Clientes Account Genius
   add('66144440120c0a00170a464e', mkAcquired('Account Genius', 'Clientes Account Genius - Sem contato', DEST.assinaturas.clienteAtivo));
   add('66835b9094b600001abb3fd3', mkAcquired('Account Genius', 'Clientes Account Genius - Mensagem automática', DEST.assinaturas.clienteAtivo));
   add('66144440120c0a00170a4656', mkAcquired('Account Genius', 'Clientes Account Genius - Mensagem enviada', DEST.assinaturas.clienteAtivo));
@@ -544,7 +563,7 @@ function mkInterest(produto, pipelineAtualLabel, destStageId) {
   return {
     produtoInteresse: [produto],
     produtoAdquirido: [],
-    modeloProduto: 'Pago', // ajuste se quiser inferir diferente
+    modeloProduto: 'Pago',
     pipelineAtualLabel,
     destStageId,
   };
@@ -554,7 +573,7 @@ function mkAcquired(produto, pipelineAtualLabel, destStageId) {
   return {
     produtoInteresse: [],
     produtoAdquirido: [produto],
-    modeloProduto: 'Pago', // ajuste se quiser inferir diferente
+    modeloProduto: 'Pago',
     pipelineAtualLabel,
     destStageId,
   };
@@ -562,12 +581,15 @@ function mkAcquired(produto, pipelineAtualLabel, destStageId) {
 
 /**
  * Retry helper with exponential backoff + jitter
+ * - obeys Retry-After header when present (common in 429)
  */
 async function requestWithRetry(fn, tag) {
   let attempt = 0;
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
     attempt++;
+
     try {
       return await fn();
     } catch (err) {
@@ -578,7 +600,14 @@ async function requestWithRetry(fn, tag) {
         throw enrichAxiosError(err, tag);
       }
 
-      const wait = Math.min(30_000, 500 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+      const retryAfter = err?.response?.headers?.['retry-after'];
+      const retryAfterMs = retryAfter ? Number(retryAfter) * 1000 : 0;
+
+      const backoffMs = Math.min(30_000, 500 * 2 ** (attempt - 1));
+      const jitterMs = Math.floor(Math.random() * 250);
+
+      const wait = Math.max(retryAfterMs, backoffMs + jitterMs);
+
       console.warn(`[retry] ${tag} attempt=${attempt} status=${status} wait=${wait}ms`);
       await sleep(wait);
     }
@@ -588,7 +617,16 @@ async function requestWithRetry(fn, tag) {
 function enrichAxiosError(err, tag) {
   const status = err?.response?.status;
   const data = err?.response?.data;
-  const msg = `[${tag}] status=${status} data=${safeJson(data)}`;
+
+  // Also show error "details" if any.
+  const details =
+    data?.errors ||
+    data?.error ||
+    data?.message ||
+    data?.details ||
+    null;
+
+  const msg = `[${tag}] status=${status} data=${safeJson(data)} details=${safeJson(details)}`;
   const e = new Error(msg);
   e.original = err;
   return e;
@@ -619,12 +657,19 @@ function loadState() {
   if (!fs.existsSync(STATE_FILE)) {
     return { phases: { '1': { done: [], fail: [] }, '2': { done: [], fail: [] } } };
   }
+
   try {
     const raw = fs.readFileSync(STATE_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
+
     parsed.phases ??= { '1': { done: [], fail: [] }, '2': { done: [], fail: [] } };
     parsed.phases['1'] ??= { done: [], fail: [] };
     parsed.phases['2'] ??= { done: [], fail: [] };
+
+    // Normalize possible duplicates
+    parsed.phases['1'].done = unique(parsed.phases['1'].done || []);
+    parsed.phases['2'].done = unique(parsed.phases['2'].done || []);
+
     return parsed;
   } catch {
     return { phases: { '1': { done: [], fail: [] }, '2': { done: [], fail: [] } } };
@@ -636,13 +681,21 @@ function saveState() {
 }
 
 function markDone(phase, id) {
-  state.phases[phase].done.push(id);
+  state.phases ??= {};
+  state.phases[phase] ??= { done: [], fail: [] };
+
+  // avoid duplicates
+  if (!state.phases[phase].done.includes(id)) state.phases[phase].done.push(id);
+
   // keep state small-ish
   state.phases[phase].done = unique(state.phases[phase].done).slice(-200000);
   saveState();
 }
 
 function markFail(phase, id, err) {
+  state.phases ??= {};
+  state.phases[phase] ??= { done: [], fail: [] };
+
   state.phases[phase].fail.push({ id, error: String(err?.message || err) });
   saveState();
 }
