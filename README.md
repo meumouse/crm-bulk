@@ -51,12 +51,35 @@ https://developers.rdstation.com/reference/crm-v2-introduction
 ### 1️⃣ Criar arquivo `.env`
 
 ``` env
-RD_ACCESS_TOKEN=SEU_ACCESS_TOKEN_AQUI
+RD_ACCESS_TOKEN=SEU_ACCESS_TOKEN_AQUI  # (opcional) fallback manual
+RD_CLIENT_ID=SEU_CLIENT_ID_AQUI          # (obrigatório p/ refresh)
+RD_CLIENT_SECRET=SEU_CLIENT_SECRET_AQUI  # (obrigatório p/ refresh)
+RD_OAUTH_STATE_FILE=oauth_state.json     # (opcional) caminho do JSON local
+RD_TOKEN_URL=https://api.rd.services/oauth2/token
 RD_BASE_URL=https://api.rd.services
 REQUEST_DELAY_MS=250
 MAX_RETRIES=5
 DRY_RUN=true
 ```
+
+### 🔄 OAuth2 (renovação automática)
+
+Para evitar o fluxo de autorização novamente, o script suporta **renovação automática do access_token** usando o **refresh_token** (rolling refresh token).
+
+- O estado é salvo em um arquivo local (default: `oauth_state.json`)
+- Sempre que o token estiver para expirar (menos de 5 minutos) ou a API retornar **401**, o script renova e **atualiza o JSON**.
+
+Exemplo de `oauth_state.json` (gerado após o primeiro login OAuth do seu app):
+
+```json
+{
+  "access_token": "SEU_ACCESS_TOKEN",
+  "refresh_token": "SEU_REFRESH_TOKEN",
+  "expires_at": 0
+}
+```
+
+**Importante:** a cada renovação, a API retorna um **novo refresh_token**. O script já persiste automaticamente e o anterior deixa de funcionar.
 
 ### Variáveis
 

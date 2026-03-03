@@ -16,7 +16,11 @@ import axios from 'axios';
 import 'dotenv/config';
 
 const BASE_URL = process.env.RD_BASE_URL || 'https://api.rd.services';
-const ACCESS_TOKEN = process.env.RD_ACCESS_TOKEN;
+const ACCESS_TOKEN = process.env.RD_ACCESS_TOKEN; // optional fallback
+const RD_CLIENT_ID = process.env.RD_CLIENT_ID;
+const RD_CLIENT_SECRET = process.env.RD_CLIENT_SECRET;
+const RD_TOKEN_URL = process.env.RD_TOKEN_URL || 'https://api.rd.services/oauth2/token';
+const OAUTH_STATE_FILE = path.resolve(process.cwd(), process.env.RD_OAUTH_STATE_FILE || 'oauth_state.json');
 
 /**
  * If you keep getting 429, increase this to something like 800~1500ms.
@@ -42,16 +46,142 @@ const DRY_RUN = String(process.env.DRY_RUN || 'true').toLowerCase() === 'true';
  */
 const CUSTOM_FIELDS_KEY = String(process.env.CUSTOM_FIELDS_KEY || 'custom_fields');
 
-if (!ACCESS_TOKEN) {
-  console.error('Missing RD_ACCESS_TOKEN in .env');
-  process.exit(1);
-}
 
 const REPORT_DIR = path.resolve(process.cwd(), 'reports');
 if (!fs.existsSync(REPORT_DIR)) fs.mkdirSync(REPORT_DIR, { recursive: true });
 
 const STATE_FILE = path.resolve(process.cwd(), 'state.json');
 const state = loadState();
+
+/**
+ * OAuth2 token state (local JSON)
+ * Stored as rolling refresh token per RD docs.
+ *
+ * File default: ./oauth_state.json (configurable via RD_OAUTH_STATE_FILE)
+ * Shape:
+ *   {
+ *     "access_token": "....",
+ *     "refresh_token": "....",
+ *     "expires_at": 1710000000000,
+ *     "token_type": "Bearer",
+ *     "scope": "...",
+ *     "updated_at": "2026-03-03T00:00:00.000Z"
+ *   }
+ */
+let oauthState = loadOauthState();
+
+/**
+ * Prevent parallel refresh storms.
+ */
+let refreshInFlight = null;
+
+function loadOauthState() {
+  if (!fs.existsSync(OAUTH_STATE_FILE)) return null;
+  try {
+    const raw = fs.readFileSync(OAUTH_STATE_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveOauthState(next) {
+  oauthState = next;
+  fs.writeFileSync(OAUTH_STATE_FILE, JSON.stringify(next, null, 2));
+}
+
+/**
+ * Returns current access token, refreshing when:
+ * - missing
+ * - expiring in < 5 minutes
+ */
+async function getValidAccessToken({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  const fiveMin = 5 * 60 * 1000;
+
+  const hasToken = Boolean(oauthState?.access_token);
+  const expiresAt = Number(oauthState?.expires_at || 0);
+
+  const expiringSoon = hasToken && expiresAt && (expiresAt - now) <= fiveMin;
+
+  if (forceRefresh || !hasToken || expiringSoon) {
+    await refreshAccessToken();
+  }
+
+  // Fallback for legacy env-only usage (no refresh possible)
+  if (!oauthState?.access_token && ACCESS_TOKEN) return ACCESS_TOKEN;
+
+  if (!oauthState?.access_token) {
+    throw new Error(
+      `Missing OAuth access_token. Provide RD_ACCESS_TOKEN (one-off) or create ${path.basename(OAUTH_STATE_FILE)} with access_token + refresh_token.`
+    );
+  }
+
+  return oauthState.access_token;
+}
+
+/**
+ * Refresh OAuth token using refresh_token flow (rolling refresh token).
+ * Always persists the NEW refresh_token returned.
+ */
+async function refreshAccessToken() {
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    if (!RD_CLIENT_ID || !RD_CLIENT_SECRET) {
+      throw new Error('Missing RD_CLIENT_ID or RD_CLIENT_SECRET in .env (required to refresh OAuth token).');
+    }
+
+    const refreshToken = oauthState?.refresh_token;
+    if (!refreshToken) {
+      throw new Error(`Missing refresh_token in ${path.basename(OAUTH_STATE_FILE)}. You must run the initial OAuth authorization_code flow again.`);
+    }
+
+    const body = new URLSearchParams();
+    body.set('client_id', RD_CLIENT_ID);
+    body.set('client_secret', RD_CLIENT_SECRET);
+    body.set('refresh_token', refreshToken);
+    body.set('grant_type', 'refresh_token');
+
+    const res = await axios.post(RD_TOKEN_URL, body, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 30_000,
+    });
+
+    const data = res?.data || {};
+
+    const accessToken = data.access_token;
+    const newRefreshToken = data.refresh_token;
+    const expiresIn = Number(data.expires_in || 7200); // docs: 2 hours
+    const tokenType = data.token_type || 'Bearer';
+
+    if (!accessToken || !newRefreshToken) {
+      throw new Error(`Token refresh did not return access_token/refresh_token. response=${safeJson(data)}`);
+    }
+
+    const next = {
+      ...oauthState,
+      access_token: accessToken,
+      refresh_token: newRefreshToken, // IMPORTANT: rolling refresh token
+      token_type: tokenType,
+      scope: data.scope || oauthState?.scope,
+      expires_in: expiresIn,
+      expires_at: Date.now() + expiresIn * 1000,
+      updated_at: new Date().toISOString(),
+    };
+
+    saveOauthState(next);
+
+    console.log(`[oauth] refreshed token. expires_in=${expiresIn}s state_file=${path.basename(OAUTH_STATE_FILE)}`);
+
+    return next.access_token;
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+
+  return refreshInFlight;
+}
 
 /**
  * Your custom field IDs (deal entity)
@@ -127,11 +257,36 @@ const http = axios.create({
   baseURL: BASE_URL,
   timeout: 30_000,
   headers: {
-    Authorization: `Bearer ${ACCESS_TOKEN}`,
     'Content-Type': 'application/json',
     Accept: 'application/json',
   },
 });
+
+// Attach OAuth token on every request (and refresh when expiring soon)
+http.interceptors.request.use(async (config) => {
+  const token = await getValidAccessToken();
+  config.headers = config.headers || {};
+  config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// If API returns 401, refresh once and retry the original request automatically.
+http.interceptors.response.use(
+  (res) => res,
+  async (err) => {
+    const status = err?.response?.status;
+
+    if (status === 401 && err?.config && !err.config.__retried401) {
+      err.config.__retried401 = true;
+
+      // force refresh and retry
+      await getValidAccessToken({ forceRefresh: true });
+      return http.request(err.config);
+    }
+
+    return Promise.reject(err);
+  }
+);
 
 /**
  * CLI
