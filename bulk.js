@@ -145,6 +145,7 @@ async function main() {
 
   // 2) Iterate deals
   let processed = 0;
+
   for await (const deal of iterateDeals()) {
     if (LIMIT && processed >= LIMIT) break;
 
@@ -238,22 +239,31 @@ async function updateDeal(dealId, body, tag) {
  * - tries to follow: meta.next_page / next_page / links.next / etc.
  */
 async function* iterateDeals() {
-  // Docs: GET https://api.rd.services/crm/v2/deals :contentReference[oaicite:5]{index=5}
-  let url = `/crm/v2/deals`;
+  const pageSize = 25;
+  let pageNumber = 1;
   let safety = 0;
 
-  while (url && safety < 10000) {
+  while (safety < 100000) {
     safety++;
 
     const data = await requestWithRetry(async () => {
-      const res = await http.get(url);
+      const res = await http.get(`/crm/v2/deals`, {
+        params: {
+          'page[number]': pageNumber,
+          'page[size]': pageSize,
+        },
+      });
       return res.data;
-    }, `listDeals:${url}`);
+    }, `listDeals:page=${pageNumber}`);
 
     const deals = extractArray(data, ['deals', 'data', 'items']) || [];
+
     for (const d of deals) yield d;
 
-    url = extractNextPageUrl(data);
+    // Se veio menos que o tamanho da página, acabou.
+    if (deals.length < pageSize) break;
+
+    pageNumber++;
   }
 }
 
