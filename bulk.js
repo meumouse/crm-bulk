@@ -363,7 +363,7 @@ async function main() {
 async function phase1FillFields(ctx, dealFieldDefs) {
   const { dealId, mapping } = ctx;
 
-  const payload = buildDealUpdatePayloadPhase1(mapping, dealFieldDefs);
+  const payload = buildDealUpdatePayloadPhase1(mapping);
 
   if (!payload || Object.keys(payload).length === 0) {
     report('phase1_skipped', { dealId, reason: 'empty_payload' });
@@ -375,34 +375,43 @@ async function phase1FillFields(ctx, dealFieldDefs) {
 }
 
 async function phase2MoveDeal(ctx) {
-  const { dealId, mapping } = ctx;
+    const { dealId, mapping } = ctx;
 
-  const destStageId = mapping.destStageId;
-  if (!destStageId) {
-    report('phase2_skipped', { dealId, reason: 'no_dest_stage' });
-    return;
-  }
+    const destStageId = mapping.destStageId;
+    
+    if (!destStageId) {
+        report('phase2_skipped', { dealId, reason: 'no_dest_stage' });
+        return;
+    }
 
-  // Minimal move payload: stage_id
-  const payload = { stage_id: destStageId };
+    // Minimal move payload: stage_id
+    const payload = { stage_id: destStageId };
+    await updateDeal(dealId, payload, 'phase2');
 
-  await updateDeal(dealId, payload, 'phase2');
-  report('phase2_ok', { dealId, stage_id: destStageId });
+    report('phase2_ok', { dealId, stage_id: destStageId });
 }
 
 /**
  * Update deal with retry/backoff
  */
-async function updateDeal(dealId, body, tag) {
-  if (DRY_RUN) {
-    console.log(`[DRY_RUN] PUT /crm/v2/deals/${dealId}`, JSON.stringify(body));
-    return;
-  }
+async function updateDeal(dealId, attributes, tag) {
+    if (DRY_RUN) {
+        console.log(`[DRY_RUN] PUT /crm/v2/deals/${dealId}`, JSON.stringify(attributes));
+        return;
+    }
 
-  await requestWithRetry(async () => {
-    const res = await http.put(`/crm/v2/deals/${dealId}`, body);
-    return res.data;
-  }, `${tag}:updateDeal:${dealId}`);
+    const body = {
+        data: {
+            id: dealId,
+            type: 'deals',
+            attributes: attributes || {},
+        },
+    };
+
+    await requestWithRetry(async () => {
+        const res = await http.put(`/crm/v2/deals/${dealId}`, body);
+        return res.data;
+    }, `${tag}:updateDeal:${dealId}`);
 }
 
 /**
@@ -543,36 +552,33 @@ function buildOptionsMap(field) {
  *
  * If your API expects another shape, change CUSTOM_FIELDS_KEY via .env or adjust this function.
  */
-function buildDealUpdatePayloadPhase1(mapping, defs) {
-  const updates = [];
+function buildDealUpdatePayloadPhase1(mapping) {
+  // Aqui usamos os slugs que você viu no GET:
+  // "produto-de-interesse", "produto-adquirido", "modelo-do-produto", "pipeline-atual"
+  const customFields = {};
 
-  // Produto de interesse (multi)
   if (mapping.produtoInteresse?.length) {
-    const v = resolveMulti(defs, DEAL_FIELDS.produtoInteresse, mapping.produtoInteresse);
-    if (v) updates.push({ custom_field_id: DEAL_FIELDS.produtoInteresse, value: v });
+    customFields['produto-de-interesse'] = mapping.produtoInteresse;
   }
 
-  // Produto adquirido (multi)
   if (mapping.produtoAdquirido?.length) {
-    const v = resolveMulti(defs, DEAL_FIELDS.produtoAdquirido, mapping.produtoAdquirido);
-    if (v) updates.push({ custom_field_id: DEAL_FIELDS.produtoAdquirido, value: v });
+    customFields['produto-adquirido'] = mapping.produtoAdquirido;
   }
 
-  // Modelo do produto (single)
   if (mapping.modeloProduto) {
-    const v = resolveSingle(defs, DEAL_FIELDS.modeloProduto, mapping.modeloProduto);
-    if (v) updates.push({ custom_field_id: DEAL_FIELDS.modeloProduto, value: v });
+    customFields['modelo-do-produto'] = mapping.modeloProduto;
   }
 
-  // Pipeline atual (single) - store old stage label
   if (mapping.pipelineAtualLabel) {
-    const v = resolveSingle(defs, DEAL_FIELDS.pipelineAtual, mapping.pipelineAtualLabel);
-    if (v) updates.push({ custom_field_id: DEAL_FIELDS.pipelineAtual, value: v });
+    customFields['pipeline-atual'] = mapping.pipelineAtualLabel;
   }
 
-  if (updates.length === 0) return null;
+  if (Object.keys(customFields).length === 0) return null;
 
-  return { [CUSTOM_FIELDS_KEY]: updates };
+  // IMPORTANTE: nessa API o custom_fields é OBJETO, não array.
+  return {
+    custom_fields: customFields,
+  };
 }
 
 function resolveSingle(defs, fieldId, label) {

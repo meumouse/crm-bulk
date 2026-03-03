@@ -3,3 +3,4 @@ node_modules/
 package.lock.json
 state.json
 reports/
+oauth_state.json
