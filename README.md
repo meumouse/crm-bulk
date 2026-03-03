@@ -1,266 +1,94 @@
-# RD Station CRM - Bulk Migration Script
+# RD Station CRM bulk migration (deals)
 
-Script em **Node.js** para realizar modificações em massa no **RD
-Station CRM (API v2)**.
+Este projeto faz a migração em **duas fases** no RD Station CRM (API v2):
 
-Este projeto foi desenvolvido para:
+1. **Fase 1**: Preenche os campos personalizados da negociação com base no **funil/etapa atual**.
 
-1.  **Fase 1** -- Preencher campos personalizados das negociações com
-    base no funil/etapa antiga.
-2.  **Fase 2** -- Migrar negociações para novos funis e etapas (Low
-    Ticket, Assinaturas, Clube M, High Ticket).
+**Importante:** por padrão, a Fase 1 só preenche campos para funis de interesse quando a negociação está em **“Sem contato”** ou **“Mensagem automática”**, exatamente como você descreveu. Para mudar isso, edite `src/config/rules.js`.
+2. **Fase 2**: Move a negociação do funil antigo para a **etapa correta** nos funis novos.
 
-------------------------------------------------------------------------
+Ele foi pensado para rodar em lote, com **delay entre requisições**, **retry/backoff**, **logs em .jsonl** e **retomada** por `state.json`.
 
-## 🚀 Objetivo
+> Referências:
+> - Endpoints de negociações (listar/obter/atualizar).  
+> - Endpoints de funis/etapas (para detectar `pipeline_id` dos funis de destino).  
 
-Automatizar a reestruturação do CRM sem sobrecarregar a API, utilizando:
+## Requisitos
 
--   Requisições com delay configurável
--   Retry com backoff exponencial
--   Modo seguro (DRY_RUN)
--   Checkpoint automático
--   Logs e relatórios
+- Node.js 18+
+- Token de acesso (Bearer) **ou** OAuth com refresh token
 
-------------------------------------------------------------------------
+## Instalação
 
-## 📦 Estrutura do Projeto
-
-    crm-bulk/
-      .env
-      package.json
-      bulk.js
-      state.json        # Gerado automaticamente
-      reports/          # Logs gerados automaticamente
-
-------------------------------------------------------------------------
-
-## ⚙️ Requisitos
-
--   Node.js 18+
--   Access Token válido da API do RD Station CRM
--   Permissão para atualizar negociações
-
-Documentação oficial da API:
-https://developers.rdstation.com/reference/crm-v2-introduction
-
-------------------------------------------------------------------------
-
-## 🔐 Configuração
-
-### 1️⃣ Criar arquivo `.env`
-
-``` env
-RD_ACCESS_TOKEN=SEU_ACCESS_TOKEN_AQUI  # (opcional) fallback manual
-RD_CLIENT_ID=SEU_CLIENT_ID_AQUI          # (obrigatório p/ refresh)
-RD_CLIENT_SECRET=SEU_CLIENT_SECRET_AQUI  # (obrigatório p/ refresh)
-RD_OAUTH_STATE_FILE=oauth_state.json     # (opcional) caminho do JSON local
-RD_TOKEN_URL=https://api.rd.services/oauth2/token
-RD_BASE_URL=https://api.rd.services
-REQUEST_DELAY_MS=250
-MAX_RETRIES=5
-DRY_RUN=true
-```
-
-### 🔄 OAuth2 (renovação automática)
-
-Para evitar o fluxo de autorização novamente, o script suporta **renovação automática do access_token** usando o **refresh_token** (rolling refresh token).
-
-- O estado é salvo em um arquivo local (default: `oauth_state.json`)
-- Sempre que o token estiver para expirar (menos de 5 minutos) ou a API retornar **401**, o script renova e **atualiza o JSON**.
-
-Exemplo de `oauth_state.json` (gerado após o primeiro login OAuth do seu app):
-
-```json
-{
-  "access_token": "SEU_ACCESS_TOKEN",
-  "refresh_token": "SEU_REFRESH_TOKEN",
-  "expires_at": 0
-}
-```
-
-**Importante:** a cada renovação, a API retorna um **novo refresh_token**. O script já persiste automaticamente e o anterior deixa de funcionar.
-
-### Variáveis
-
-  Variável           Descrição
-  ------------------ ---------------------------------------------
-  RD_ACCESS_TOKEN    Token Bearer da API
-  RD_BASE_URL        URL base da API
-  REQUEST_DELAY_MS   Intervalo entre requisições
-  MAX_RETRIES        Número máximo de tentativas em caso de erro
-  DRY_RUN            true = apenas simula, false = executa
-
-------------------------------------------------------------------------
-
-## 📥 Instalação
-
-``` bash
+```bash
 npm install
+cp .env.example .env
 ```
 
-Dependências utilizadas:
+## Como rodar
 
--   axios
--   dotenv
--   cross-env
-
-------------------------------------------------------------------------
-
-## 🧪 Execução
-
-### 🔍 Teste (simulação)
-
-``` bash
-node bulk.js --phase=1 --limit=20
-node bulk.js --phase=2 --limit=20
-```
-
-ou via scripts:
-
-``` bash
-npm run phase1:dry
-npm run phase2:dry
-```
-
-------------------------------------------------------------------------
-
-### 🚀 Execução Real
-
-Altere no `.env`:
-
-``` env
-DRY_RUN=false
-```
-
-Depois execute:
-
-``` bash
+### Rodar fase 1 (somente preencher campos)
+```bash
 npm run phase1
+```
+
+### Rodar fase 2 (somente mover etapas/funis)
+```bash
 npm run phase2
 ```
 
-------------------------------------------------------------------------
+### Rodar as duas fases (uma após a outra)
+```bash
+npm run both
+```
 
-## 📌 Fases da Migração
+### Flags úteis
 
-### 🥇 Fase 1 -- Atualização de Campos
+- `--phase=1|2|both`
+- `--limit=200` (processa apenas N negociações)
+- `--onlyStage=<STAGE_ID>` (processa apenas uma etapa específica)
+- `--dryRun=true|false` (override do .env)
 
-Preenche os seguintes campos personalizados da negociação:
+Exemplo:
+```bash
+node src/index.js --phase=1 --limit=200 --dryRun=true
+```
 
--   Produto de Interesse (multi)
--   Produto Adquirido (multi)
--   Modelo do Produto (single)
--   Pipeline Atual (single)
+## OAuth (renovação automática)
 
-A lógica é baseada na etapa antiga da negociação.
+Se você quiser **renovar access_token automaticamente**, crie um arquivo (padrão: `oauth_token.json`) no formato:
 
-------------------------------------------------------------------------
+```json
+{
+  "access_token": "....",
+  "refresh_token": "....",
+  "expires_at": 1772566669186,
+  "token_type": "bearer",
+  "expires_in": 7200,
+  "updated_at": "2026-03-03T17:37:49.186Z"
+}
+```
 
-### 🥈 Fase 2 -- Migração de Funis
+E defina no `.env`:
 
-Move negociações para novos funis:
+- `RD_CLIENT_ID`
+- `RD_CLIENT_SECRET`
+- `RD_OAUTH_STATE_FILE=oauth_token.json`
 
-#### 🎯 Low Ticket
+> Se `RD_ACCESS_TOKEN` estiver definido, ele é usado como fallback caso o arquivo OAuth não exista.
 
--   Sem contato
--   Contato feito
--   Identificação do interesse
--   Período grátis
--   Assinou
--   Downsell
+## Logs / relatórios
 
-#### 🔁 Assinaturas / Recorrente
+Arquivos gerados em `./reports/`:
 
--   Cliente ativo
--   Tentativa de upsell
--   Proposta upgrade
--   Negociação upgrade
--   Upgrade realizado
+- `phase1_ok.jsonl`, `phase1_skipped.jsonl`
+- `phase2_ok.jsonl`, `phase2_skipped.jsonl`
+- `errors_phase_1.log`, `errors_phase_2.log`
 
-#### 🏆 Clube M
+Cada linha dos `.jsonl` contém: timestamp, dealId e payload aplicado.
 
--   Lead elegível
--   Apresentação
--   Proposta enviada
--   Negociação
--   Assinou
+## Ajustes de regra (onde editar)
 
-#### 💼 High Ticket / Serviços
+- `src/config/rd-config.js`: IDs de etapas (origem e destino), slugs, modelos, etc.
+- `src/config/rules.js`: regras da Fase 1 e mapeamento da Fase 2.
 
--   Lead qualificado
--   Diagnóstico enviado
--   Reunião
--   Proposta enviada
--   Negociação
--   Fechado ganho
-
-------------------------------------------------------------------------
-
-## 🔄 Controle de Execução
-
-### ✅ Checkpoint automático
-
-Arquivo:
-
-    state.json
-
-Evita reprocessar negociações já atualizadas.
-
-------------------------------------------------------------------------
-
-### 📊 Relatórios
-
-Gerados na pasta:
-
-    /reports
-
-Arquivos: - phase1_ok.jsonl - phase2_ok.jsonl - errors_phase_1.log -
-errors_phase_2.log
-
-------------------------------------------------------------------------
-
-## 🛡️ Segurança
-
-O script implementa:
-
--   Retry com backoff exponencial
--   Tratamento de erro HTTP 429 (rate limit)
--   Delay configurável
--   Execução em modo simulação
--   Logs detalhados
-
-------------------------------------------------------------------------
-
-## 🧠 Boas Práticas
-
-Antes de rodar em produção:
-
-1.  Execute sempre primeiro com `DRY_RUN=true`
-2.  Teste com `--limit=10`
-3.  Teste com `--onlyStage=ID_DA_ETAPA`
-4.  Faça backup/export das negociações
-
-------------------------------------------------------------------------
-
-## 📚 API Utilizada
-
--   GET /crm/v2/deals
--   PUT /crm/v2/deals/{id}
--   GET /crm/v2/custom_fields
-
-Base URL:
-
-    https://api.rd.services
-
-------------------------------------------------------------------------
-
-## 👨‍💻 Autor
-
-Projeto desenvolvido para reestruturação de CRM da MeuMouse.com
-
-------------------------------------------------------------------------
-
-## 📄 Licença
-
-Uso interno / privado.

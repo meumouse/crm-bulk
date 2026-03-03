@@ -1,6 +1,6 @@
 node_modules/
 .env
-package.lock.json
-state.json
 reports/
+state.json
+oauth_token.json
 oauth_state.json
