@@ -1,0 +1,21 @@
+{
+  "name": "rd-crm-bulk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bulk updates/migration for RD Station CRM (deals custom fields + pipeline/stage moves).",
+  "main": "bulk.js",
+  "scripts": {
+    "phase1:dry": "cross-env DRY_RUN=true node bulk.js --phase=1",
+    "phase2:dry": "cross-env DRY_RUN=true node bulk.js --phase=2",
+    "phase1": "cross-env DRY_RUN=false node bulk.js --phase=1",
+    "phase2": "cross-env DRY_RUN=false node bulk.js --phase=2"
+  },
+  "dependencies": {
+    "axios": "^1.13.6",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3"
+  }
+}
