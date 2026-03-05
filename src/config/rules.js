@@ -38,8 +38,25 @@ export function buildPhase1Payload(cfg, deal) {
   const meta = STAGE_INDEX.get(deal?.stage_id);
   if (!meta) return null;
 
-  // As especificado: para funis de interesse, só preencher na etapa "Sem contato" ou "Mensagem automática"
-  if (meta.funnelType === 'interest' && !['SEM_CONTATO', 'MENSAGEM_AUTOMATICA'].includes(meta.stageKey)) {
+  // Fase 1 (funis de interesse): preencher também em etapas mais avançadas.
+  // Regras:
+  // - Mensagem enviada
+  // - Demonstrou interesse
+  // - Oferta enviada
+  // - Follow up da oferta
+  // - Comprou
+  // (Mantemos Sem contato + Mensagem automática para compatibilidade)
+  const PHASE1_INTEREST_ALLOWED = new Set([
+    'SEM_CONTATO',
+    'MENSAGEM_AUTOMATICA',
+    'MENSAGEM_ENVIADA',
+    'DEMONSTROU_INTERESSE',
+    'OFERTA_ENVIADA',
+    'FOLLOW_UP_OFERTA',
+    'COMPROU',
+  ]);
+
+  if (meta.funnelType === 'interest' && !PHASE1_INTEREST_ALLOWED.has(meta.stageKey)) {
     return null;
   }
 
@@ -103,11 +120,6 @@ export function buildPhase2Payload(cfg, deal) {
   const meta = STAGE_INDEX.get(deal?.stage_id);
   if (!meta) return null;
 
-  // As especificado: para funis de interesse, só preencher na etapa "Sem contato" ou "Mensagem automática"
-  if (meta.funnelType === 'interest' && !['SEM_CONTATO', 'MENSAGEM_AUTOMATICA'].includes(meta.stageKey)) {
-    return null;
-  }
-
   if (meta.funnelType === 'customer') {
     const stageId = TARGET_FUNNELS.ASSINATURAS_RECORRENTE.stages.CLIENTE_ATIVO;
     const pipelineId = cfg.pipelineIdByName?.[TARGET_FUNNELS.ASSINATURAS_RECORRENTE.name] || null;
@@ -127,14 +139,17 @@ export function buildPhase2Payload(cfg, deal) {
         destStageId = low.stages.SEM_CONTATO;
         break;
       case 'MENSAGEM_ENVIADA':
+        // Requisito: Mensagem enviada -> Contato feito
         destStageId = low.stages.CONTATO_FEITO;
         break;
       case 'DEMONSTROU_INTERESSE':
       case 'OFERTA_ENVIADA':
       case 'FOLLOW_UP_OFERTA':
+        // Requisito: Demonstrou interesse / Oferta enviada / Follow up -> Identificação do interesse
         destStageId = low.stages.IDENTIFICACAO_INTERESSE;
         break;
       case 'COMPROU':
+        // Requisito: Comprou -> Assinou
         destStageId = low.stages.ASSINOU;
         break;
       case 'DOWNSELL':

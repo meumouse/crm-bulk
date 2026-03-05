@@ -18,7 +18,6 @@ function parseArgs(argv) {
 
 	for (const raw of argv) {
 		if (!raw.startsWith('--')) continue;
-		
 		const [k, v] = raw.slice(2).split('=');
 		out[k] = v === undefined ? true : v;
 	}

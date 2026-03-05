@@ -38,7 +38,14 @@ export function getAppConfig(cliArgs = {}) {
   const mergeMultiSelect = toBool(env.MERGE_MULTI_SELECT, true);
 
   const paginationMode = String(env.PAGINATION_MODE || 'jsonapi'); // jsonapi | page_limit
-  const pageSize = toNum(env.PAGE_SIZE, 50);
+  const requestedPageSize = toNum(env.PAGE_SIZE, 25);
+
+// NOTE: RD Station CRM v2 endpoints commonly cap JSON:API page[size].
+// To avoid unexpected behavior (including premature stop conditions), we cap it here.
+// You can still use smaller values via PAGE_SIZE.
+const pageSize = paginationMode === 'jsonapi'
+  ? Math.max(1, Math.min(requestedPageSize, 100))
+  : Math.max(1, requestedPageSize);
 
   return {
     baseUrl,

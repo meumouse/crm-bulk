@@ -69,7 +69,11 @@ export async function* iterateDeals(cfg, rd) {
       continue;
     }
 
-    if (deals.length < pageSize) break;
+    // IMPORTANT: Do not assume the API will honor the requested page size.
+    // Some RD endpoints cap page[size]. If we stop when deals.length < pageSize,
+    // we may prematurely stop after the first page and 'skip' lots of results.
+    // Instead, keep paging until the endpoint returns an empty page (or provides a next link).
+    if (!deals.length) break;
     pageNumber++;
   }
 }

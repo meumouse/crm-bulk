@@ -139,6 +139,19 @@ export const SOURCE_FUNNELS = {
       DOWNSELL: '66146e180b58e50014f76fdf',
     },
   },
+  	'Joinotify': {
+		type: 'customer',
+		stages: {
+			SEM_CONTATO: '675053c514571e00134602f2',
+			MENSAGEM_AUTOMATICA: '675053c514571e00134602f3',
+			MENSAGEM_ENVIADA: '675053c514571e00134602f4',
+			DEMONSTROU_INTERESSE: '675053c514571e00134602f5',
+			OFERTA_ENVIADA: '675053c514571e00134602f6',
+			FOLLOW_UP_OFERTA: '6750540a5427a800196c39ef',
+			COMPROU: '6750541a0040eb0019e99e14',
+			DOWNSELL: '6750543c37e542001ecc3572',
+		},
+	},
 };
 
 // Destination stages (stage_id)
@@ -164,12 +177,12 @@ export const TARGET_FUNNELS = {
 
 // Stage key -> readable label
 export const STAGE_LABELS = {
-  SEM_CONTATO: 'Sem contato',
-  MENSAGEM_AUTOMATICA: 'Mensagem automática',
-  MENSAGEM_ENVIADA: 'Mensagem enviada',
-  DEMONSTROU_INTERESSE: 'Demonstrou interesse',
-  OFERTA_ENVIADA: 'Oferta enviada',
-  FOLLOW_UP_OFERTA: 'Follow-up',
-  COMPROU: 'Comprou',
-  DOWNSELL: 'Downsell',
+    SEM_CONTATO: 'Sem contato',
+    MENSAGEM_AUTOMATICA: 'Mensagem automática',
+    MENSAGEM_ENVIADA: 'Mensagem enviada',
+    DEMONSTROU_INTERESSE: 'Demonstrou interesse',
+    OFERTA_ENVIADA: 'Oferta enviada',
+    FOLLOW_UP_OFERTA: 'Follow up da oferta',
+    COMPROU: 'Comprou',
+    DOWNSELL: 'Downsell',
 };
